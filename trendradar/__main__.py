@@ -37,7 +37,7 @@ def _parse_version(version_str: str) -> Tuple[int, int, int]:
         if len(parts) >= 3:
             return int(parts[0]), int(parts[1]), int(parts[2])
         return 0, 0, 0
-    except:
+    except (ValueError, AttributeError, TypeError):
         return 0, 0, 0
 
 
@@ -564,6 +564,8 @@ class NewsAnalyzer:
                     scheduler = self.ctx.create_scheduler()
                     date_str = self.ctx.format_date()
                     scheduler.record_execution(schedule.period_key, "analyze", date_str)
+            elif result.skipped:
+                print(f"[AI] {result.error}")
             else:
                 print(f"[AI] 分析失败: {result.error}")
 
@@ -867,7 +869,22 @@ class NewsAnalyzer:
                 standalone_data=standalone_data
             )
 
-        # HTML生成（如果启用）
+        # 翻译 RSS 内容（如果启用）— 在 HTML 生成前执行，确保网页版也能展示翻译内容
+        # 注意：仅翻译 rss_items 和 rss_new_items，不翻译 standalone_data（通知前会重新生成）
+        # 热榜翻译在推送时由 dispatch_all 处理 report_data
+        trans_config = self.ctx.config.get("AI_TRANSLATION", {})
+        if trans_config.get("ENABLED", False):
+            dispatcher = self.ctx.create_notification_dispatcher()
+            display_regions = self.ctx.config.get("DISPLAY", {}).get("REGIONS", {})
+            _, rss_items, rss_new_items, _ = \
+                dispatcher.translate_content(
+                    report_data={"stats": [], "new_titles": []},
+                    rss_items=rss_items,
+                    rss_new_items=rss_new_items,
+                    display_regions=display_regions,
+                )
+
+        # HTML生成（如果启用）— 使用翻译后的数据
         html_file = None
         if self.ctx.config["STORAGE"]["FORMATS"]["HTML"]:
             html_file = self.ctx.generate_html(
@@ -960,6 +977,7 @@ class NewsAnalyzer:
             update_info_to_send = self.update_info if cfg["SHOW_VERSION_UPDATE"] else None
 
             # 使用 NotificationDispatcher 发送到所有渠道
+            # RSS/独立展示区数据已在分析流水线中翻译过，跳过重复翻译（仅翻译热榜 report_data）
             dispatcher = self.ctx.create_notification_dispatcher()
             results = dispatcher.dispatch_all(
                 report_data=report_data,
@@ -972,6 +990,7 @@ class NewsAnalyzer:
                 rss_new_items=rss_new_items,
                 ai_analysis=ai_result,
                 standalone_data=standalone_data,
+                skip_translation=True,
             )
 
             if not results:
@@ -1009,14 +1028,14 @@ class NewsAnalyzer:
 
         return False
 
-    def _initialize_and_check_config(self) -> None:
-        """通用初始化和配置检查"""
+    def _initialize_and_check_config(self) -> bool:
+        """通用初始化和配置检查。返回 True 表示可以继续执行。"""
         now = self.ctx.get_time()
         print(f"当前北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
         if not self.ctx.config["ENABLE_CRAWLER"]:
             print("爬虫功能已禁用（ENABLE_CRAWLER=False），程序退出")
-            return
+            return False
 
         has_notification = self._has_notification_configured()
         if not self.ctx.config["ENABLE_NOTIFICATION"]:
@@ -1029,6 +1048,7 @@ class NewsAnalyzer:
         mode_strategy = self._get_mode_strategy()
         print(f"报告模式: {self.report_mode}")
         print(f"运行模式: {mode_strategy['description']}")
+        return True
 
     def _crawl_data(self) -> Tuple[Dict, Dict, List]:
         """执行数据爬取"""
@@ -1687,7 +1707,8 @@ class NewsAnalyzer:
     def run(self) -> None:
         """执行分析流程"""
         try:
-            self._initialize_and_check_config()
+            if not self._initialize_and_check_config():
+                return
 
             mode_strategy = self._get_mode_strategy()
 
